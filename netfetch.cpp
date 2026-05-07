@@ -32,8 +32,6 @@
 #include <net/if.h>
 #include <netinet/ip_icmp.h>
 #include <sys/time.h>
-#include <sys/ioctl.h>
-#include <termios.h>
 
 typedef unsigned long long ULONG64;
 typedef unsigned long ULONG;
@@ -107,34 +105,20 @@ std::string getOSVersion() {
         }
     }
 #else
-    if (access("/system/bin/getprop", F_OK) == 0) {
-        osName = "Android";
-        FILE* p = popen("getprop ro.build.version.release", "r");
-        if (p) {
-            char buf[32];
-            if (fgets(buf, sizeof(buf), p)) {
-                std::string ver(buf);
-                ver.erase(std::remove(ver.begin(), ver.end(), '\n'), ver.end());
-                if (!ver.empty()) osName += " " + ver;
+    std::ifstream f("/etc/os-release");
+    if (f.is_open()) {
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.find("PRETTY_NAME=") == 0) {
+                osName = line.substr(12);
+                if (osName.front() == '"' && osName.back() == '"') {
+                    osName = osName.substr(1, osName.length() - 2);
+                }
+                break;
             }
-            pclose(p);
         }
     } else {
-        std::ifstream f("/etc/os-release");
-        if (f.is_open()) {
-            std::string line;
-            while (std::getline(f, line)) {
-                if (line.find("PRETTY_NAME=") == 0) {
-                    osName = line.substr(12);
-                    if (osName.front() == '"' && osName.back() == '"') {
-                        osName = osName.substr(1, osName.length() - 2);
-                    }
-                    break;
-                }
-            }
-        } else {
-            osName = "Linux";
-        }
+        osName = "Linux";
     }
 #endif
     return osName;
@@ -190,26 +174,6 @@ std::string lossBar(int percent) {
 
     std::string result = RESET + "[ " + color;
     for (int i = 0; i < filled; i++) result += "x";
-    result += GRAY;
-    for (int i = filled; i < total; i++) result += "-";
-    result += RESET + " ]";
-
-    return result;
-}
-
-std::string signalBar(int dbm) {
-    int total = 18;
-    // Map -90dBm to 0% and -30dBm to 100%
-    int percent = (dbm + 90) * 100 / 60;
-    percent = std::max(0, std::min(100, percent));
-    int filled = (percent * total) / 100;
-
-    std::string color = RED;
-    if (percent > 40) color = YELLOW;
-    if (percent > 70) color = GREEN;
-
-    std::string result = RESET + "[ " + color;
-    for (int i = 0; i < filled; i++) result += "!";
     result += GRAY;
     for (int i = filled; i < total; i++) result += "-";
     result += RESET + " ]";
@@ -326,9 +290,7 @@ NetworkStats getTotalNetworkUsage() {
         FreeMibTable(pIfTable);
     }
 #else
-    std::ifstream f("/proc/self/net/dev");
-    if (!f.is_open()) f.open("/proc/net/dev");
-
+    std::ifstream f("/proc/net/dev");
     if (f.is_open()) {
         std::string line;
         while (std::getline(f, line)) {
@@ -343,45 +305,6 @@ NetworkStats getTotalNetworkUsage() {
                     stats.txBytes += txBytes;
                 }
             }
-        }
-    }
-    if (stats.rxBytes == 0 && stats.txBytes == 0) {
-        // Fallback for Android/Termux where /proc/net/dev is restricted
-        // Use ifconfig to get stats
-        FILE* pipe = popen("ifconfig 2>/dev/null", "r");
-        if (pipe) {
-            char buffer[512];
-            while (fgets(buffer, sizeof(buffer), pipe)) {
-                std::string line(buffer);
-                if (line.find("bytes") != std::string::npos) {
-                    size_t pos = line.find("RX bytes");
-                    if (pos == std::string::npos) pos = line.find("RX packets");
-                    if (pos != std::string::npos) {
-                        // Look for the number after "bytes" or "bytes:"
-                        size_t bpos = line.find("bytes", pos);
-                        if (bpos != std::string::npos) {
-                            std::string s = line.substr(bpos + 5);
-                            if (!s.empty() && s[0] == ':') s = s.substr(1);
-                            std::istringstream iss(s);
-                            ULONG64 val;
-                            if (iss >> val) stats.rxBytes += val;
-                        }
-                    }
-                    pos = line.find("TX bytes");
-                    if (pos == std::string::npos) pos = line.find("TX packets");
-                    if (pos != std::string::npos) {
-                        size_t bpos = line.find("bytes", pos);
-                        if (bpos != std::string::npos) {
-                            std::string s = line.substr(bpos + 5);
-                            if (!s.empty() && s[0] == ':') s = s.substr(1);
-                            std::istringstream iss(s);
-                            ULONG64 val;
-                            if (iss >> val) stats.txBytes += val;
-                        }
-                    }
-                }
-            }
-            pclose(pipe);
         }
     }
 #endif
@@ -564,7 +487,6 @@ struct AdapterInfo {
     std::string status;
     std::string mtu;
     std::string speed;
-    std::string signal;
     bool dhcpEnabled;
 };
 
@@ -580,7 +502,6 @@ AdapterInfo getRealAdapterInfo() {
     info.description = "Unknown";
     info.mtu = "N/A";
     info.speed = "Unknown";
-    info.signal = "N/A";
     info.dhcpEnabled = false;
 
 #ifdef _WIN32
@@ -696,26 +617,6 @@ AdapterInfo getRealAdapterInfo() {
         freeifaddrs(ifaddr);
     }
 
-#ifndef _WIN32
-    // On Android, if we couldn't find an interface with an IP, try to find ANY UP interface
-    if (info.name == "Unknown") {
-        FILE* pipe = popen("ifconfig 2>/dev/null | grep 'Link' | awk '{print $1}'", "r");
-        if (!pipe) pipe = popen("ifconfig 2>/dev/null | grep 'flags' | awk -F':' '{print $1}'", "r");
-        if (pipe) {
-            char buffer[128];
-            if (fgets(buffer, sizeof(buffer), pipe)) {
-                std::string name(buffer);
-                name.erase(std::remove(name.begin(), name.end(), '\n'), name.end());
-                if (!name.empty()) {
-                    info.name = name;
-                    info.status = "UP";
-                }
-            }
-            pclose(pipe);
-        }
-    }
-#endif
-
     if (info.name != "Unknown") {
         std::string macPath = "/sys/class/net/" + info.name + "/address";
         std::ifstream f(macPath);
@@ -759,121 +660,16 @@ AdapterInfo getRealAdapterInfo() {
             }
         }
         
-        if (info.mtu == "N/A") {
-            int sock = socket(AF_INET, SOCK_DGRAM, 0);
-            if (sock >= 0) {
-                struct ifreq ifr;
-                memset(&ifr, 0, sizeof(ifr));
-                strncpy(ifr.ifr_name, info.name.c_str(), IFNAMSIZ - 1);
-                if (ioctl(sock, SIOCGIFMTU, &ifr) >= 0) {
-                    info.mtu = std::to_string(ifr.ifr_mtu);
-                }
-                close(sock);
-            }
-        }
-
-        if (info.mtu == "N/A") {
-            std::string mcmd = "ifconfig " + info.name + " 2>/dev/null";
-            FILE* mpipe = popen(mcmd.c_str(), "r");
-            if (mpipe) {
-                char mbuf[512];
-                while (fgets(mbuf, sizeof(mbuf), mpipe)) {
-                    std::string s(mbuf);
-                    size_t pos = s.find("mtu ");
-                    if (pos != std::string::npos) {
-                        std::string m = s.substr(pos + 4);
-                        std::istringstream iss(m);
-                        std::string val;
-                        if (iss >> val) info.mtu = val;
-                        break;
-                    }
-                }
-                pclose(mpipe);
-            }
-        }
-
-        if (info.mac == "N/A") {
-            int sock = socket(AF_INET, SOCK_DGRAM, 0);
-            if (sock >= 0) {
-                struct ifreq ifr;
-                memset(&ifr, 0, sizeof(ifr));
-                strncpy(ifr.ifr_name, info.name.c_str(), IFNAMSIZ - 1);
-                if (ioctl(sock, SIOCGIFHWADDR, &ifr) >= 0) {
-                    char mac[32];
-                    unsigned char* ptr = (unsigned char*)ifr.ifr_hwaddr.sa_data;
-                    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-                        ptr[0], ptr[1], ptr[2], ptr[3], ptr[4], ptr[5]);
-                    info.mac = mac;
-                }
-                close(sock);
-            }
-        }
-
-        if (info.mac == "N/A") {
-            std::string maccmd = "ifconfig " + info.name + " 2>/dev/null";
-            FILE* macpipe = popen(maccmd.c_str(), "r");
-            if (macpipe) {
-                char macbuf[512];
-                while (fgets(macbuf, sizeof(macbuf), macpipe)) {
-                    std::string s(macbuf);
-                    size_t pos = s.find("ether ");
-                    if (pos == std::string::npos) pos = s.find("HWaddr ");
-                    if (pos != std::string::npos) {
-                        size_t offset = (s.find("ether ") != std::string::npos) ? 6 : 7;
-                        std::string m = s.substr(pos + offset);
-                        std::istringstream iss(m);
-                        std::string val;
-                        if (iss >> val) info.mac = val;
-                        break;
-                    }
-                }
-                pclose(macpipe);
-            }
+        std::string mtuPath = "/sys/class/net/" + info.name + "/mtu";
+        std::ifstream mf(mtuPath);
+        if (mf.is_open()) {
+            std::string mtu;
+            mf >> mtu;
+            if (!mtu.empty()) info.mtu = mtu;
         }
     }
 
-#ifndef _WIN32
-    // Try to get gateway and MTU from /proc/net/route (more reliable on Android)
-    std::ifstream routeFile("/proc/net/route");
-    if (routeFile.is_open()) {
-        std::string line;
-        std::getline(routeFile, line); // Skip header
-        while (std::getline(routeFile, line)) {
-            std::istringstream iss(line);
-            std::string iface, dest, gatewayStr, flags, refcnt, use, metric, mask, mtu;
-            if (iss >> iface >> dest >> gatewayStr >> flags >> refcnt >> use >> metric >> mask >> mtu) {
-                if (dest == "00000000") { // Default route
-                    if (info.gateway == "N/A") {
-                        unsigned int addr;
-                        std::stringstream ss;
-                        ss << std::hex << gatewayStr;
-                        ss >> addr;
-                        struct in_addr gaddr;
-                        gaddr.s_addr = addr;
-                        char* ip = inet_ntoa(gaddr);
-                        if (ip && strcmp(ip, "0.0.0.0") != 0) info.gateway = ip;
-                    }
-                    if (info.mtu == "N/A") info.mtu = mtu;
-                }
-            }
-        }
-    }
-
-    if (info.gateway == "N/A") {
-        FILE* pipe = popen("ip route get 8.8.8.8 2>/dev/null | grep via | awk '{print $3}'", "r");
-        if (pipe) {
-            char buffer[128];
-            if (fgets(buffer, sizeof(buffer), pipe)) {
-                std::string gw(buffer);
-                gw.erase(std::remove(gw.begin(), gw.end(), '\n'), gw.end());
-                if (!gw.empty()) info.gateway = gw;
-            }
-            pclose(pipe);
-        }
-    }
-#endif
-
-    FILE* pipe = popen("ip route 2>/dev/null | grep default | awk '{print $3}'", "r");
+    FILE* pipe = popen("ip route | grep default | awk '{print $3}'", "r");
     if (pipe) {
         char buffer[128];
         if (fgets(buffer, sizeof(buffer), pipe) != NULL) {
@@ -912,62 +708,7 @@ AdapterInfo getRealAdapterInfo() {
         }
     }
 
-    if (info.dns == "N/A") {
-        FILE* dp = popen("getprop | grep -E '\\.dns[0-9]*\\]' | head -n 1 | awk -F': ' '{print $2}'", "r");
-        if (dp) {
-            char dbuf[128];
-            if (fgets(dbuf, sizeof(dbuf), dp)) {
-                std::string d(dbuf);
-                d.erase(std::remove(d.begin(), d.end(), '\n'), d.end());
-                d.erase(std::remove(d.begin(), d.end(), '['), d.end());
-                d.erase(std::remove(d.begin(), d.end(), ']'), d.end());
-                if (!d.empty()) info.dns = d;
-            }
-            pclose(dp);
-        }
-    }
-
-#ifndef _WIN32
-    // Get WiFi signal strength on Android
-    std::ifstream wifiFile("/proc/net/wireless");
-    if (wifiFile.is_open()) {
-        std::string line;
-        std::getline(wifiFile, line); // Skip header
-        std::getline(wifiFile, line); // Skip header
-        while (std::getline(wifiFile, line)) {
-            if (line.find(":") != std::string::npos) {
-                size_t colon = line.find(":");
-                std::string data = line.substr(colon + 1);
-                std::istringstream iss(data);
-                std::string status;
-                double link, level, noise;
-                if (iss >> status >> link >> level >> noise) {
-                    // level is in dBm
-                    info.signal = std::to_string((int)level) + " dBm";
-                    break;
-                }
-            }
-        }
-    }
-
-    if (info.signal == "N/A") {
-        FILE* sp = popen("cmd wifi status 2>/dev/null | grep RSSI | awk '{print $3}'", "r");
-        if (sp) {
-            char sbuf[64];
-            if (fgets(sbuf, sizeof(sbuf), sp)) {
-                std::string s(sbuf);
-                s.erase(std::remove(s.begin(), s.end(), '\n'), s.end());
-                if (!s.empty()) {
-                    if (s.find("-") == std::string::npos) s = "-" + s;
-                    info.signal = s + " dBm";
-                }
-            }
-            pclose(sp);
-        }
-    }
-#endif
-
-    FILE* dpipe = popen("ip addr show 2>/dev/null | grep -q \"dynamic\" && echo yes || echo no", "r");
+    FILE* dpipe = popen("ip addr show | grep -q \"dynamic\" && echo yes || echo no", "r");
     if (dpipe) {
         char dbuf[16];
         if (fgets(dbuf, sizeof(dbuf), dpipe)) {
@@ -980,22 +721,6 @@ AdapterInfo getRealAdapterInfo() {
     return info;
 }
 
-int getTerminalWidth() {
-#ifdef _WIN32
-    CONSOLE_SCREEN_BUFFER_INFO csbi;
-    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi)) {
-        return csbi.srWindow.Right - csbi.srWindow.Left + 1;
-    }
-    return 80;
-#else
-    struct winsize w;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0) {
-        return w.ws_col;
-    }
-    return 80;
-#endif
-}
-
 struct InfoLine {
     std::string label;
     std::string value;
@@ -1006,50 +731,18 @@ struct InfoLine {
 };
 
 void printNeofetch(const std::vector<std::string>& ascii, const std::vector<InfoLine>& info, const std::string& asciiColor = CYAN) {
-    int termWidth = getTerminalWidth();
-    int asciiMaxWidth = 0;
-    for (const auto& s : ascii) asciiMaxWidth = std::max(asciiMaxWidth, (int)s.length());
-    
-    // Fixed threshold for vertical layout (safer for mobile)
-    bool vertical = (termWidth < 100);
-
-    if (vertical) {
-        std::cout << "\n";
-        for (const auto& line : ascii) {
-            std::cout << asciiColor << BOLD << line << RESET << "\n";
-        }
-        std::cout << "\n";
-        for (const auto& line : info) {
-            if (line.isSeparator) {
-                std::cout << GRAY << "────────────────────────────────────────────" << RESET << "\n";
-            } else if (line.isHeader) {
-                std::cout << CYAN << line.label << RESET << "\n";
-            } else if (line.isColorBlock) {
-                std::cout << line.value << "\n";
-            } else if (line.label.empty() && line.value.empty()) {
-                std::cout << "\n";
-            } else {
-                int labelWidth = line.isIndented ? 11 : 13;
-                std::string prefix = line.isIndented ? "  " : "";
-                std::cout << prefix << CYAN << std::left << std::setw(labelWidth) << line.label 
-                          << RESET << line.value << "\n";
-            }
-        }
-        return;
-    }
-
     size_t maxLines = std::max(ascii.size(), info.size());
-    int fixedAsciiWidth = std::max(asciiMaxWidth + 4, 35); 
+    int asciiWidth = 44; 
 
     std::cout << "\n";
 
     for (size_t i = 0; i < maxLines; ++i) {
         if (i < ascii.size()) {
-            int padding = fixedAsciiWidth - ascii[i].length();
+            int padding = asciiWidth - ascii[i].length();
             if (padding < 0) padding = 0;
             std::cout << asciiColor << BOLD << ascii[i] << std::string(padding, ' ') << RESET;
         } else {
-            std::cout << std::string(fixedAsciiWidth, ' ');
+            std::cout << std::string(asciiWidth, ' ');
         }
 
         if (i < info.size()) {
@@ -1321,29 +1014,6 @@ int main(int argc, char* argv[]) {
         R"(                      )"
     };
 
-    std::vector<std::string> asciiAndroid = {
-        R"(        .        .        )",
-        R"(         \      /         )",
-        R"(        ..------..        )",
-        R"(       /          \       )",
-        R"(      |    o  o    |      )",
-        R"(      |            |      )",
-        R"(  ----------------------  )",
-        R"(  |  |              |  |  )",
-        R"(  |  |              |  |  )",
-        R"(  |  |              |  |  )",
-        R"(  |  |              |  |  )",
-        R"(  |  |              |  |  )",
-        R"(  ----------------------  )",
-        R"(      |    ||    |        )",
-        R"(      |    ||    |        )",
-        R"(      '----''----'        )",
-        R"(                          )",
-        R"(                          )",
-        R"(                          )",
-        R"(                          )"
-    };
-
     std::string osName = getOSVersion();
     std::string osNameLower = osName;
     std::transform(osNameLower.begin(), osNameLower.end(), osNameLower.begin(), ::tolower);
@@ -1372,9 +1042,6 @@ int main(int argc, char* argv[]) {
     } else if (osNameLower.find("linux") != std::string::npos) {
         ascii = asciiLinux;
         asciiColor = WHITE;
-    } else if (osNameLower.find("android") != std::string::npos) {
-        ascii = asciiAndroid;
-        asciiColor = GREEN;
     }
 
     auto formatVal = [](const std::string& val) {
@@ -1386,22 +1053,6 @@ int main(int argc, char* argv[]) {
 
     std::vector<InfoLine> info;
     info.push_back({"OS:", formatVal(osName)});
-    
-#ifndef _WIN32
-    if (osName.find("Android") != std::string::npos) {
-        FILE* p = popen("getprop ro.product.model", "r");
-        if (p) {
-            char buf[64];
-            if (fgets(buf, sizeof(buf), p)) {
-                std::string model(buf);
-                model.erase(std::remove(model.begin(), model.end(), '\n'), model.end());
-                if (!model.empty()) info.push_back({"Device:", formatVal(model)});
-            }
-            pclose(p);
-        }
-    }
-#endif
-
     info.push_back({"Interface:", formatVal(adapter.name)});
     info.push_back({"Desc:", formatVal(adapter.description)});
     info.push_back({"Status:", colorizeStatus(adapter.status)});
@@ -1411,11 +1062,6 @@ int main(int argc, char* argv[]) {
     info.push_back({"Data Tx:", WHITE + formatBytes(stats.txBytes) + RESET});
     info.push_back({"Speed:", formatVal(adapter.speed)});
     info.push_back({"MTU:", formatVal(adapter.mtu)});
-    
-    if (adapter.signal != "N/A") {
-        int dbm = atoi(adapter.signal.c_str());
-        info.push_back({"Signal:", signalBar(dbm) + " " + WHITE + adapter.signal + RESET});
-    }
 
     if (!compactMode) {
         info.push_back({"", ""});
