@@ -323,6 +323,36 @@ NetworkStats getTotalNetworkUsage() {
             }
         }
     }
+    if (stats.rxBytes == 0 && stats.txBytes == 0) {
+        // Fallback for Android/Termux where /proc/net/dev is restricted
+        // Use ifconfig to get stats
+        FILE* pipe = popen("ifconfig 2>/dev/null", "r");
+        if (pipe) {
+            char buffer[512];
+            while (fgets(buffer, sizeof(buffer), pipe)) {
+                std::string line(buffer);
+                if (line.find("RX packets") != std::string::npos && line.find("bytes") != std::string::npos) {
+                    size_t pos = line.find("bytes");
+                    if (pos != std::string::npos) {
+                        std::string bytesStr = line.substr(pos + 5);
+                        std::istringstream iss(bytesStr);
+                        ULONG64 val;
+                        if (iss >> val) stats.rxBytes += val;
+                    }
+                }
+                if (line.find("TX packets") != std::string::npos && line.find("bytes") != std::string::npos) {
+                    size_t pos = line.find("bytes");
+                    if (pos != std::string::npos) {
+                        std::string bytesStr = line.substr(pos + 5);
+                        std::istringstream iss(bytesStr);
+                        ULONG64 val;
+                        if (iss >> val) stats.txBytes += val;
+                    }
+                }
+            }
+            pclose(pipe);
+        }
+    }
 #endif
     return stats;
 }
@@ -633,6 +663,26 @@ AdapterInfo getRealAdapterInfo() {
         freeifaddrs(ifaddr);
     }
 
+#ifndef _WIN32
+    // On Android, if we couldn't find an interface with an IP, try to find ANY UP interface
+    if (info.name == "Unknown") {
+        FILE* pipe = popen("ifconfig 2>/dev/null | grep 'Link' | awk '{print $1}'", "r");
+        if (!pipe) pipe = popen("ifconfig 2>/dev/null | grep 'flags' | awk -F':' '{print $1}'", "r");
+        if (pipe) {
+            char buffer[128];
+            if (fgets(buffer, sizeof(buffer), pipe)) {
+                std::string name(buffer);
+                name.erase(std::remove(name.begin(), name.end(), '\n'), name.end());
+                if (!name.empty()) {
+                    info.name = name;
+                    info.status = "UP";
+                }
+            }
+            pclose(pipe);
+        }
+    }
+#endif
+
     if (info.name != "Unknown") {
         std::string macPath = "/sys/class/net/" + info.name + "/address";
         std::ifstream f(macPath);
@@ -677,33 +727,75 @@ AdapterInfo getRealAdapterInfo() {
         }
         
         if (info.mtu == "N/A") {
-            std::string mcmd = "ifconfig " + info.name + " 2>/dev/null | grep -o 'mtu [0-9]*' | awk '{print $2}'";
+            std::string mcmd = "ifconfig " + info.name + " 2>/dev/null";
             FILE* mpipe = popen(mcmd.c_str(), "r");
             if (mpipe) {
-                char mbuf[32];
-                if (fgets(mbuf, sizeof(mbuf), mpipe)) {
-                    std::string m(mbuf);
-                    m.erase(std::remove(m.begin(), m.end(), '\n'), m.end());
-                    if (!m.empty()) info.mtu = m;
+                char mbuf[512];
+                while (fgets(mbuf, sizeof(mbuf), mpipe)) {
+                    std::string s(mbuf);
+                    size_t pos = s.find("mtu ");
+                    if (pos != std::string::npos) {
+                        std::string m = s.substr(pos + 4);
+                        std::istringstream iss(m);
+                        std::string val;
+                        if (iss >> val) info.mtu = val;
+                        break;
+                    }
                 }
                 pclose(mpipe);
             }
         }
 
         if (info.mac == "N/A") {
-            std::string maccmd = "ifconfig " + info.name + " 2>/dev/null | grep -o 'ether [0-9a-fA-F:]*' | awk '{print $2}'";
+            std::string maccmd = "ifconfig " + info.name + " 2>/dev/null";
             FILE* macpipe = popen(maccmd.c_str(), "r");
             if (macpipe) {
-                char macbuf[64];
-                if (fgets(macbuf, sizeof(macbuf), macpipe)) {
-                    std::string m(macbuf);
-                    m.erase(std::remove(m.begin(), m.end(), '\n'), m.end());
-                    if (!m.empty()) info.mac = m;
+                char macbuf[512];
+                while (fgets(macbuf, sizeof(macbuf), macpipe)) {
+                    std::string s(macbuf);
+                    size_t pos = s.find("ether ");
+                    if (pos == std::string::npos) pos = s.find("HWaddr ");
+                    if (pos != std::string::npos) {
+                        size_t offset = (s.find("ether ") != std::string::npos) ? 6 : 7;
+                        std::string m = s.substr(pos + offset);
+                        std::istringstream iss(m);
+                        std::string val;
+                        if (iss >> val) info.mac = val;
+                        break;
+                    }
                 }
                 pclose(macpipe);
             }
         }
     }
+
+#ifndef _WIN32
+    // Try to get gateway and MTU from /proc/net/route (more reliable on Android)
+    std::ifstream routeFile("/proc/net/route");
+    if (routeFile.is_open()) {
+        std::string line;
+        std::getline(routeFile, line); // Skip header
+        while (std::getline(routeFile, line)) {
+            std::istringstream iss(line);
+            std::string iface, dest, gatewayStr, flags, refcnt, use, metric, mask, mtu;
+            if (iss >> iface >> dest >> gatewayStr >> flags >> refcnt >> use >> metric >> mask >> mtu) {
+                if (dest == "00000000") { // Default route
+                    if (info.gateway == "N/A") {
+                        unsigned int addr;
+                        std::stringstream ss;
+                        ss << std::hex << gatewayStr;
+                        ss >> addr;
+                        struct in_addr gaddr;
+                        gaddr.s_addr = addr;
+                        char* ip = inet_ntoa(gaddr);
+                        if (ip && strcmp(ip, "0.0.0.0") != 0) info.gateway = ip;
+                    }
+                    if (info.mtu == "N/A") info.mtu = mtu;
+                }
+            }
+        }
+    }
+#endif
 
     FILE* pipe = popen("ip route 2>/dev/null | grep default | awk '{print $3}'", "r");
     if (pipe) {
@@ -743,12 +835,14 @@ AdapterInfo getRealAdapterInfo() {
     }
 
     if (info.dns == "N/A") {
-        FILE* dp = popen("getprop net.dns1 2>/dev/null", "r");
+        FILE* dp = popen("getprop | grep -E '\\.dns[0-9]*\\]' | head -n 1 | awk -F': ' '{print $2}'", "r");
         if (dp) {
             char dbuf[128];
             if (fgets(dbuf, sizeof(dbuf), dp)) {
                 std::string d(dbuf);
                 d.erase(std::remove(d.begin(), d.end(), '\n'), d.end());
+                d.erase(std::remove(d.begin(), d.end(), '['), d.end());
+                d.erase(std::remove(d.begin(), d.end(), ']'), d.end());
                 if (!d.empty()) info.dns = d;
             }
             pclose(dp);
