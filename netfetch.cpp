@@ -331,22 +331,31 @@ NetworkStats getTotalNetworkUsage() {
             char buffer[512];
             while (fgets(buffer, sizeof(buffer), pipe)) {
                 std::string line(buffer);
-                if (line.find("RX packets") != std::string::npos && line.find("bytes") != std::string::npos) {
-                    size_t pos = line.find("bytes");
+                if (line.find("bytes") != std::string::npos) {
+                    size_t pos = line.find("RX bytes");
+                    if (pos == std::string::npos) pos = line.find("RX packets");
                     if (pos != std::string::npos) {
-                        std::string bytesStr = line.substr(pos + 5);
-                        std::istringstream iss(bytesStr);
-                        ULONG64 val;
-                        if (iss >> val) stats.rxBytes += val;
+                        // Look for the number after "bytes" or "bytes:"
+                        size_t bpos = line.find("bytes", pos);
+                        if (bpos != std::string::npos) {
+                            std::string s = line.substr(bpos + 5);
+                            if (!s.empty() && s[0] == ':') s = s.substr(1);
+                            std::istringstream iss(s);
+                            ULONG64 val;
+                            if (iss >> val) stats.rxBytes += val;
+                        }
                     }
-                }
-                if (line.find("TX packets") != std::string::npos && line.find("bytes") != std::string::npos) {
-                    size_t pos = line.find("bytes");
+                    pos = line.find("TX bytes");
+                    if (pos == std::string::npos) pos = line.find("TX packets");
                     if (pos != std::string::npos) {
-                        std::string bytesStr = line.substr(pos + 5);
-                        std::istringstream iss(bytesStr);
-                        ULONG64 val;
-                        if (iss >> val) stats.txBytes += val;
+                        size_t bpos = line.find("bytes", pos);
+                        if (bpos != std::string::npos) {
+                            std::string s = line.substr(bpos + 5);
+                            if (!s.empty() && s[0] == ':') s = s.substr(1);
+                            std::istringstream iss(s);
+                            ULONG64 val;
+                            if (iss >> val) stats.txBytes += val;
+                        }
                     }
                 }
             }
@@ -808,18 +817,20 @@ AdapterInfo getRealAdapterInfo() {
         pclose(pipe);
     }
 
-    if (info.gateway == "N/A") {
-        FILE* gp = popen("getprop net.gateway 2>/dev/null", "r");
-        if (gp) {
-            char gbuf[128];
-            if (fgets(gbuf, sizeof(gbuf), gp)) {
-                std::string g(gbuf);
-                g.erase(std::remove(g.begin(), g.end(), '\n'), g.end());
-                if (!g.empty()) info.gateway = g;
-            }
-            pclose(gp);
-        }
-    }
+                    if (info.gateway == "N/A") {
+                        FILE* gp = popen("getprop | grep -E 'gateway|default_gw' | head -n 1 | awk -F': ' '{print $2}'", "r");
+                        if (gp) {
+                            char gbuf[128];
+                            if (fgets(gbuf, sizeof(gbuf), gp)) {
+                                std::string g(gbuf);
+                                g.erase(std::remove(g.begin(), g.end(), '['), g.end());
+                                g.erase(std::remove(g.begin(), g.end(), ']'), g.end());
+                                g.erase(std::remove(g.begin(), g.end(), '\n'), g.end());
+                                if (!g.empty()) info.gateway = g;
+                            }
+                            pclose(gp);
+                        }
+                    }
 
     std::ifstream rf("/etc/resolv.conf");
     if (rf.is_open()) {
@@ -889,23 +900,18 @@ struct InfoLine {
 
 void printNeofetch(const std::vector<std::string>& ascii, const std::vector<InfoLine>& info, const std::string& asciiColor = CYAN) {
     int termWidth = getTerminalWidth();
-    int asciiWidth = 0;
-    for (const auto& s : ascii) asciiWidth = std::max(asciiWidth, (int)s.length());
+    int asciiMaxWidth = 0;
+    for (const auto& s : ascii) asciiMaxWidth = std::max(asciiMaxWidth, (int)s.length());
     
-    // Add some padding to asciiWidth
-    asciiWidth += 4;
+    // Fixed threshold for vertical layout (safer for mobile)
+    bool vertical = (termWidth < 100);
 
-    // If terminal is too narrow, use vertical layout
-    if (termWidth < (asciiWidth + 40)) {
+    if (vertical) {
         std::cout << "\n";
-        // Print ASCII first
         for (const auto& line : ascii) {
-            if (line.find_first_not_of(' ') != std::string::npos) {
-                std::cout << asciiColor << BOLD << line << RESET << "\n";
-            }
+            std::cout << asciiColor << BOLD << line << RESET << "\n";
         }
         std::cout << "\n";
-        // Print Info
         for (const auto& line : info) {
             if (line.isSeparator) {
                 std::cout << GRAY << "────────────────────────────────────────────" << RESET << "\n";
@@ -926,8 +932,7 @@ void printNeofetch(const std::vector<std::string>& ascii, const std::vector<Info
     }
 
     size_t maxLines = std::max(ascii.size(), info.size());
-    // Fixed width for side-by-side to keep columns aligned
-    int fixedAsciiWidth = std::max(asciiWidth, 35); 
+    int fixedAsciiWidth = std::max(asciiMaxWidth + 4, 35); 
 
     std::cout << "\n";
 
