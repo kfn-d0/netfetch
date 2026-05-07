@@ -32,6 +32,9 @@
 #include <net/if.h>
 #include <netinet/ip_icmp.h>
 #include <sys/time.h>
+
+typedef unsigned long long ULONG64;
+typedef unsigned long ULONG;
 #endif
 
 struct PingResult {
@@ -374,66 +377,100 @@ PingResult getPing(const char* ipString, int count = 4) {
         sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
         is_raw = true;
     }
-    if (sockfd < 0) return pr;
 
-    struct timeval tv;
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+    if (sockfd >= 0) {
+        struct timeval tv;
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
 
-    int successCount = 0;
-    int totalLatency = 0;
-    int id = getpid() & 0xFFFF;
+        int successCount = 0;
+        int totalLatency = 0;
+        int id = getpid() & 0xFFFF;
 
-    for (int i = 0; i < count; i++) {
-        struct icmphdr icmp_hdr;
-        memset(&icmp_hdr, 0, sizeof(icmp_hdr));
-        icmp_hdr.type = ICMP_ECHO;
-        icmp_hdr.code = 0;
-        icmp_hdr.un.echo.id = htons(id);
-        icmp_hdr.un.echo.sequence = htons(i + 1);
-        icmp_hdr.checksum = icmp_checksum((unsigned short*)&icmp_hdr, sizeof(icmp_hdr));
+        for (int i = 0; i < count; i++) {
+            struct icmphdr icmp_hdr;
+            memset(&icmp_hdr, 0, sizeof(icmp_hdr));
+            icmp_hdr.type = ICMP_ECHO;
+            icmp_hdr.code = 0;
+            icmp_hdr.un.echo.id = htons(id);
+            icmp_hdr.un.echo.sequence = htons(i + 1);
+            icmp_hdr.checksum = icmp_checksum((unsigned short*)&icmp_hdr, sizeof(icmp_hdr));
 
-        struct timeval start, end;
-        gettimeofday(&start, NULL);
+            struct timeval start, end;
+            gettimeofday(&start, NULL);
 
-        if (sendto(sockfd, &icmp_hdr, sizeof(icmp_hdr), 0, (struct sockaddr*)&addr, sizeof(addr)) <= 0) continue;
+            if (sendto(sockfd, &icmp_hdr, sizeof(icmp_hdr), 0, (struct sockaddr*)&addr, sizeof(addr)) <= 0) continue;
 
-        char buffer[1024];
-        struct sockaddr_in recv_addr;
-        socklen_t addr_len = sizeof(recv_addr);
-        
-        while (true) {
-            int bytes = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr*)&recv_addr, &addr_len);
-            if (bytes <= 0) break;
+            char buffer[1024];
+            struct sockaddr_in recv_addr;
+            socklen_t addr_len = sizeof(recv_addr);
             
-            gettimeofday(&end, NULL);
-            struct icmphdr *recv_hdr = NULL;
-            if (is_raw) {
-                int ip_hdr_len = (buffer[0] & 0x0F) * 4;
-                if (bytes >= ip_hdr_len + (int)sizeof(struct icmphdr)) {
-                    recv_hdr = (struct icmphdr *)(buffer + ip_hdr_len);
+            while (true) {
+                int bytes = recvfrom(sockfd, buffer, sizeof(buffer), 0, (struct sockaddr*)&recv_addr, &addr_len);
+                if (bytes <= 0) break;
+                
+                gettimeofday(&end, NULL);
+                struct icmphdr *recv_hdr = NULL;
+                if (is_raw) {
+                    int ip_hdr_len = (buffer[0] & 0x0F) * 4;
+                    if (bytes >= ip_hdr_len + (int)sizeof(struct icmphdr)) {
+                        recv_hdr = (struct icmphdr *)(buffer + ip_hdr_len);
+                    }
+                } else {
+                    if (bytes >= (int)sizeof(struct icmphdr)) {
+                        recv_hdr = (struct icmphdr *)buffer;
+                    }
                 }
-            } else {
-                if (bytes >= (int)sizeof(struct icmphdr)) {
-                    recv_hdr = (struct icmphdr *)buffer;
+                
+                if (recv_hdr && (recv_hdr->type == ICMP_ECHOREPLY || recv_hdr->type == 0) && recv_hdr->un.echo.id == htons(id) && recv_hdr->un.echo.sequence == htons(i + 1)) {
+                    int lat = (end.tv_sec - start.tv_sec) * 1000 + (end.tv_usec - start.tv_usec) / 1000;
+                    if (lat == 0) lat = 1;
+                    totalLatency += lat;
+                    successCount++;
+                    break;
                 }
-            }
-            
-            if (recv_hdr && (recv_hdr->type == ICMP_ECHOREPLY || recv_hdr->type == 0) && recv_hdr->un.echo.id == htons(id) && recv_hdr->un.echo.sequence == htons(i + 1)) {
-                int lat = (end.tv_sec - start.tv_sec) * 1000 + (end.tv_usec - start.tv_usec) / 1000;
-                if (lat == 0) lat = 1;
-                totalLatency += lat;
-                successCount++;
-                break;
             }
         }
-    }
-    close(sockfd);
+        close(sockfd);
 
-    if (successCount > 0) {
-        pr.latency = totalLatency / successCount;
-        pr.lossPercent = ((count - successCount) * 100) / count;
+        if (successCount > 0) {
+            pr.latency = totalLatency / successCount;
+            pr.lossPercent = ((count - successCount) * 100) / count;
+            return pr;
+        }
+    }
+
+    // Fallback to ping command if sockets fail
+    std::string cmd = "ping -c " + std::to_string(count) + " -W 1 " + std::string(ipString) + " 2>/dev/null";
+    FILE* p = popen(cmd.c_str(), "r");
+    if (p) {
+        char buf[256];
+        while (fgets(buf, sizeof(buf), p)) {
+            std::string line(buf);
+            if (line.find("rtt min/avg/max/mdev") != std::string::npos) {
+                size_t eq = line.find("=");
+                if (eq != std::string::npos) {
+                    size_t s1 = line.find("/", eq);
+                    size_t s2 = line.find("/", s1 + 1);
+                    if (s1 != std::string::npos && s2 != std::string::npos) {
+                        std::string avg = line.substr(s1 + 1, s2 - s1 - 1);
+                        pr.latency = (int)atof(avg.c_str());
+                    }
+                }
+            }
+            if (line.find("packet loss") != std::string::npos) {
+                size_t percent = line.find("%");
+                if (percent != std::string::npos) {
+                    size_t space = line.find_last_of(" ", percent);
+                    if (space != std::string::npos) {
+                        std::string loss = line.substr(space + 1, percent - space - 1);
+                        pr.lossPercent = atoi(loss.c_str());
+                    }
+                }
+            }
+        }
+        pclose(p);
     }
     return pr;
 #endif
@@ -598,6 +635,31 @@ AdapterInfo getRealAdapterInfo() {
             }
         }
         
+        if (info.speed == "Unknown") {
+            std::string usbSpeedPath = "/sys/class/net/" + info.name + "/device/../speed";
+            std::ifstream usf(usbSpeedPath);
+            if (usf.is_open()) {
+                int uspeed;
+                if (usf >> uspeed && uspeed > 0) {
+                    info.speed = std::to_string(uspeed) + " Mbps (USB)";
+                }
+            }
+        }
+
+        if (info.speed == "Unknown") {
+            std::string scmd = "ethtool " + info.name + " 2>/dev/null | grep Speed | awk '{print $2}'";
+            FILE* spipe = popen(scmd.c_str(), "r");
+            if (spipe) {
+                char sbuf[64];
+                if (fgets(sbuf, sizeof(sbuf), spipe)) {
+                    std::string s(sbuf);
+                    s.erase(std::remove(s.begin(), s.end(), '\n'), s.end());
+                    if (!s.empty() && s.find("Unknown") == std::string::npos) info.speed = s;
+                }
+                pclose(spipe);
+            }
+        }
+        
         std::string mtuPath = "/sys/class/net/" + info.name + "/mtu";
         std::ifstream mf(mtuPath);
         if (mf.is_open()) {
@@ -629,6 +691,16 @@ AdapterInfo getRealAdapterInfo() {
                 break;
             }
         }
+    }
+
+    FILE* dpipe = popen("ip addr show | grep -q \"dynamic\" && echo yes || echo no", "r");
+    if (dpipe) {
+        char dbuf[16];
+        if (fgets(dbuf, sizeof(dbuf), dpipe)) {
+            std::string d(dbuf);
+            if (d.find("yes") != std::string::npos) info.dhcpEnabled = true;
+        }
+        pclose(dpipe);
     }
 #endif
     return info;
