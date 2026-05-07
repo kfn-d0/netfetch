@@ -32,6 +32,8 @@
 #include <net/if.h>
 #include <netinet/ip_icmp.h>
 #include <sys/time.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 
 typedef unsigned long long ULONG64;
 typedef unsigned long ULONG;
@@ -766,6 +768,22 @@ AdapterInfo getRealAdapterInfo() {
     return info;
 }
 
+int getTerminalWidth() {
+#ifdef _WIN32
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi)) {
+        return csbi.srWindow.Right - csbi.srWindow.Left + 1;
+    }
+    return 80;
+#else
+    struct winsize w;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0) {
+        return w.ws_col;
+    }
+    return 80;
+#endif
+}
+
 struct InfoLine {
     std::string label;
     std::string value;
@@ -776,18 +794,56 @@ struct InfoLine {
 };
 
 void printNeofetch(const std::vector<std::string>& ascii, const std::vector<InfoLine>& info, const std::string& asciiColor = CYAN) {
+    int termWidth = getTerminalWidth();
+    int asciiWidth = 0;
+    for (const auto& s : ascii) asciiWidth = std::max(asciiWidth, (int)s.length());
+    
+    // Add some padding to asciiWidth
+    asciiWidth += 4;
+
+    // If terminal is too narrow, use vertical layout
+    if (termWidth < (asciiWidth + 40)) {
+        std::cout << "\n";
+        // Print ASCII first
+        for (const auto& line : ascii) {
+            if (line.find_first_not_of(' ') != std::string::npos) {
+                std::cout << asciiColor << BOLD << line << RESET << "\n";
+            }
+        }
+        std::cout << "\n";
+        // Print Info
+        for (const auto& line : info) {
+            if (line.isSeparator) {
+                std::cout << GRAY << "────────────────────────────────────────────" << RESET << "\n";
+            } else if (line.isHeader) {
+                std::cout << CYAN << line.label << RESET << "\n";
+            } else if (line.isColorBlock) {
+                std::cout << line.value << "\n";
+            } else if (line.label.empty() && line.value.empty()) {
+                std::cout << "\n";
+            } else {
+                int labelWidth = line.isIndented ? 11 : 13;
+                std::string prefix = line.isIndented ? "  " : "";
+                std::cout << prefix << CYAN << std::left << std::setw(labelWidth) << line.label 
+                          << RESET << line.value << "\n";
+            }
+        }
+        return;
+    }
+
     size_t maxLines = std::max(ascii.size(), info.size());
-    int asciiWidth = 44; 
+    // Fixed width for side-by-side to keep columns aligned
+    int fixedAsciiWidth = std::max(asciiWidth, 35); 
 
     std::cout << "\n";
 
     for (size_t i = 0; i < maxLines; ++i) {
         if (i < ascii.size()) {
-            int padding = asciiWidth - ascii[i].length();
+            int padding = fixedAsciiWidth - ascii[i].length();
             if (padding < 0) padding = 0;
             std::cout << asciiColor << BOLD << ascii[i] << std::string(padding, ' ') << RESET;
         } else {
-            std::cout << std::string(asciiWidth, ' ');
+            std::cout << std::string(fixedAsciiWidth, ' ');
         }
 
         if (i < info.size()) {
