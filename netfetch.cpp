@@ -197,6 +197,26 @@ std::string lossBar(int percent) {
     return result;
 }
 
+std::string signalBar(int dbm) {
+    int total = 18;
+    // Map -90dBm to 0% and -30dBm to 100%
+    int percent = (dbm + 90) * 100 / 60;
+    percent = std::max(0, std::min(100, percent));
+    int filled = (percent * total) / 100;
+
+    std::string color = RED;
+    if (percent > 40) color = YELLOW;
+    if (percent > 70) color = GREEN;
+
+    std::string result = RESET + "[ " + color;
+    for (int i = 0; i < filled; i++) result += "!";
+    result += GRAY;
+    for (int i = filled; i < total; i++) result += "-";
+    result += RESET + " ]";
+
+    return result;
+}
+
 std::string fetchUrl(const char* url) {
 #ifdef _WIN32
     HINTERNET hInternet = InternetOpenA("Netfetch/1.0", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
@@ -542,6 +562,7 @@ struct AdapterInfo {
     std::string status;
     std::string mtu;
     std::string speed;
+    std::string signal;
     bool dhcpEnabled;
 };
 
@@ -557,6 +578,7 @@ AdapterInfo getRealAdapterInfo() {
     info.description = "Unknown";
     info.mtu = "N/A";
     info.speed = "Unknown";
+    info.signal = "N/A";
     info.dhcpEnabled = false;
 
 #ifdef _WIN32
@@ -859,6 +881,46 @@ AdapterInfo getRealAdapterInfo() {
             pclose(dp);
         }
     }
+
+#ifndef _WIN32
+    // Get WiFi signal strength on Android
+    std::ifstream wifiFile("/proc/net/wireless");
+    if (wifiFile.is_open()) {
+        std::string line;
+        std::getline(wifiFile, line); // Skip header
+        std::getline(wifiFile, line); // Skip header
+        while (std::getline(wifiFile, line)) {
+            if (line.find(":") != std::string::npos) {
+                size_t colon = line.find(":");
+                std::string data = line.substr(colon + 1);
+                std::istringstream iss(data);
+                std::string status;
+                double link, level, noise;
+                if (iss >> status >> link >> level >> noise) {
+                    // level is in dBm
+                    info.signal = std::to_string((int)level) + " dBm";
+                    break;
+                }
+            }
+        }
+    }
+
+    if (info.signal == "N/A") {
+        FILE* sp = popen("cmd wifi status 2>/dev/null | grep RSSI | awk '{print $3}'", "r");
+        if (sp) {
+            char sbuf[64];
+            if (fgets(sbuf, sizeof(sbuf), sp)) {
+                std::string s(sbuf);
+                s.erase(std::remove(s.begin(), s.end(), '\n'), s.end());
+                if (!s.empty()) {
+                    if (s.find("-") == std::string::npos) s = "-" + s;
+                    info.signal = s + " dBm";
+                }
+            }
+            pclose(sp);
+        }
+    }
+#endif
 
     FILE* dpipe = popen("ip addr show 2>/dev/null | grep -q \"dynamic\" && echo yes || echo no", "r");
     if (dpipe) {
@@ -1304,6 +1366,11 @@ int main(int argc, char* argv[]) {
     info.push_back({"Data Tx:", WHITE + formatBytes(stats.txBytes) + RESET});
     info.push_back({"Speed:", formatVal(adapter.speed)});
     info.push_back({"MTU:", formatVal(adapter.mtu)});
+    
+    if (adapter.signal != "N/A") {
+        int dbm = atoi(adapter.signal.c_str());
+        info.push_back({"Signal:", signalBar(dbm) + " " + WHITE + adapter.signal + RESET});
+    }
 
     if (!compactMode) {
         info.push_back({"", ""});
