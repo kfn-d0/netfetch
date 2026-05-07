@@ -326,7 +326,9 @@ NetworkStats getTotalNetworkUsage() {
         FreeMibTable(pIfTable);
     }
 #else
-    std::ifstream f("/proc/net/dev");
+    std::ifstream f("/proc/self/net/dev");
+    if (!f.is_open()) f.open("/proc/net/dev");
+
     if (f.is_open()) {
         std::string line;
         while (std::getline(f, line)) {
@@ -758,6 +760,19 @@ AdapterInfo getRealAdapterInfo() {
         }
         
         if (info.mtu == "N/A") {
+            int sock = socket(AF_INET, SOCK_DGRAM, 0);
+            if (sock >= 0) {
+                struct ifreq ifr;
+                memset(&ifr, 0, sizeof(ifr));
+                strncpy(ifr.ifr_name, info.name.c_str(), IFNAMSIZ - 1);
+                if (ioctl(sock, SIOCGIFMTU, &ifr) >= 0) {
+                    info.mtu = std::to_string(ifr.ifr_mtu);
+                }
+                close(sock);
+            }
+        }
+
+        if (info.mtu == "N/A") {
             std::string mcmd = "ifconfig " + info.name + " 2>/dev/null";
             FILE* mpipe = popen(mcmd.c_str(), "r");
             if (mpipe) {
@@ -774,6 +789,23 @@ AdapterInfo getRealAdapterInfo() {
                     }
                 }
                 pclose(mpipe);
+            }
+        }
+
+        if (info.mac == "N/A") {
+            int sock = socket(AF_INET, SOCK_DGRAM, 0);
+            if (sock >= 0) {
+                struct ifreq ifr;
+                memset(&ifr, 0, sizeof(ifr));
+                strncpy(ifr.ifr_name, info.name.c_str(), IFNAMSIZ - 1);
+                if (ioctl(sock, SIOCGIFHWADDR, &ifr) >= 0) {
+                    char mac[32];
+                    unsigned char* ptr = (unsigned char*)ifr.ifr_hwaddr.sa_data;
+                    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                        ptr[0], ptr[1], ptr[2], ptr[3], ptr[4], ptr[5]);
+                    info.mac = mac;
+                }
+                close(sock);
             }
         }
 
@@ -824,6 +856,19 @@ AdapterInfo getRealAdapterInfo() {
                     if (info.mtu == "N/A") info.mtu = mtu;
                 }
             }
+        }
+    }
+
+    if (info.gateway == "N/A") {
+        FILE* pipe = popen("ip route get 8.8.8.8 2>/dev/null | grep via | awk '{print $3}'", "r");
+        if (pipe) {
+            char buffer[128];
+            if (fgets(buffer, sizeof(buffer), pipe)) {
+                std::string gw(buffer);
+                gw.erase(std::remove(gw.begin(), gw.end(), '\n'), gw.end());
+                if (!gw.empty()) info.gateway = gw;
+            }
+            pclose(pipe);
         }
     }
 #endif
