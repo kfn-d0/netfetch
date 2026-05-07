@@ -2,6 +2,9 @@
 
 A lightweight, network diagnostic CLI for Windows and Linux, inspired by `neofetch`. It grabs your current network interfaces, speed, MTU, data usage, latency, public ASN/IP, and detects your OS to print it alongside a dynamic ASCII art logo.
 
+<img width="652" height="421" alt="1" src="https://github.com/user-attachments/assets/9d72ee98-a009-4282-a95b-1e8a9c2738a3" />
+
+
 ## Building from Source
 
 To compile the project from source, you need a standard C++ compiler.
