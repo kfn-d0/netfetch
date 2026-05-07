@@ -105,20 +105,34 @@ std::string getOSVersion() {
         }
     }
 #else
-    std::ifstream f("/etc/os-release");
-    if (f.is_open()) {
-        std::string line;
-        while (std::getline(f, line)) {
-            if (line.find("PRETTY_NAME=") == 0) {
-                osName = line.substr(12);
-                if (osName.front() == '"' && osName.back() == '"') {
-                    osName = osName.substr(1, osName.length() - 2);
-                }
-                break;
+    if (access("/system/bin/getprop", F_OK) == 0) {
+        osName = "Android";
+        FILE* p = popen("getprop ro.build.version.release", "r");
+        if (p) {
+            char buf[32];
+            if (fgets(buf, sizeof(buf), p)) {
+                std::string ver(buf);
+                ver.erase(std::remove(ver.begin(), ver.end(), '\n'), ver.end());
+                if (!ver.empty()) osName += " " + ver;
             }
+            pclose(p);
         }
     } else {
-        osName = "Linux";
+        std::ifstream f("/etc/os-release");
+        if (f.is_open()) {
+            std::string line;
+            while (std::getline(f, line)) {
+                if (line.find("PRETTY_NAME=") == 0) {
+                    osName = line.substr(12);
+                    if (osName.front() == '"' && osName.back() == '"') {
+                        osName = osName.substr(1, osName.length() - 2);
+                    }
+                    break;
+                }
+            }
+        } else {
+            osName = "Linux";
+        }
     }
 #endif
     return osName;
@@ -660,16 +674,36 @@ AdapterInfo getRealAdapterInfo() {
             }
         }
         
-        std::string mtuPath = "/sys/class/net/" + info.name + "/mtu";
-        std::ifstream mf(mtuPath);
-        if (mf.is_open()) {
-            std::string mtu;
-            mf >> mtu;
-            if (!mtu.empty()) info.mtu = mtu;
+        if (info.mtu == "N/A") {
+            std::string mcmd = "ifconfig " + info.name + " 2>/dev/null | grep -o 'mtu [0-9]*' | awk '{print $2}'";
+            FILE* mpipe = popen(mcmd.c_str(), "r");
+            if (mpipe) {
+                char mbuf[32];
+                if (fgets(mbuf, sizeof(mbuf), mpipe)) {
+                    std::string m(mbuf);
+                    m.erase(std::remove(m.begin(), m.end(), '\n'), m.end());
+                    if (!m.empty()) info.mtu = m;
+                }
+                pclose(mpipe);
+            }
+        }
+
+        if (info.mac == "N/A") {
+            std::string maccmd = "ifconfig " + info.name + " 2>/dev/null | grep -o 'ether [0-9a-fA-F:]*' | awk '{print $2}'";
+            FILE* macpipe = popen(maccmd.c_str(), "r");
+            if (macpipe) {
+                char macbuf[64];
+                if (fgets(macbuf, sizeof(macbuf), macpipe)) {
+                    std::string m(macbuf);
+                    m.erase(std::remove(m.begin(), m.end(), '\n'), m.end());
+                    if (!m.empty()) info.mac = m;
+                }
+                pclose(macpipe);
+            }
         }
     }
 
-    FILE* pipe = popen("ip route | grep default | awk '{print $3}'", "r");
+    FILE* pipe = popen("ip route 2>/dev/null | grep default | awk '{print $3}'", "r");
     if (pipe) {
         char buffer[128];
         if (fgets(buffer, sizeof(buffer), pipe) != NULL) {
@@ -678,6 +712,19 @@ AdapterInfo getRealAdapterInfo() {
             if (!gw.empty()) info.gateway = gw;
         }
         pclose(pipe);
+    }
+
+    if (info.gateway == "N/A") {
+        FILE* gp = popen("getprop net.gateway 2>/dev/null", "r");
+        if (gp) {
+            char gbuf[128];
+            if (fgets(gbuf, sizeof(gbuf), gp)) {
+                std::string g(gbuf);
+                g.erase(std::remove(g.begin(), g.end(), '\n'), g.end());
+                if (!g.empty()) info.gateway = g;
+            }
+            pclose(gp);
+        }
     }
 
     std::ifstream rf("/etc/resolv.conf");
@@ -693,7 +740,20 @@ AdapterInfo getRealAdapterInfo() {
         }
     }
 
-    FILE* dpipe = popen("ip addr show | grep -q \"dynamic\" && echo yes || echo no", "r");
+    if (info.dns == "N/A") {
+        FILE* dp = popen("getprop net.dns1 2>/dev/null", "r");
+        if (dp) {
+            char dbuf[128];
+            if (fgets(dbuf, sizeof(dbuf), dp)) {
+                std::string d(dbuf);
+                d.erase(std::remove(d.begin(), d.end(), '\n'), d.end());
+                if (!d.empty()) info.dns = d;
+            }
+            pclose(dp);
+        }
+    }
+
+    FILE* dpipe = popen("ip addr show 2>/dev/null | grep -q \"dynamic\" && echo yes || echo no", "r");
     if (dpipe) {
         char dbuf[16];
         if (fgets(dbuf, sizeof(dbuf), dpipe)) {
@@ -999,6 +1059,29 @@ int main(int argc, char* argv[]) {
         R"(                      )"
     };
 
+    std::vector<std::string> asciiAndroid = {
+        R"(        .        .        )",
+        R"(         \      /         )",
+        R"(        ..------..        )",
+        R"(       /          \       )",
+        R"(      |    o  o    |      )",
+        R"(      |            |      )",
+        R"(  ----------------------  )",
+        R"(  |  |              |  |  )",
+        R"(  |  |              |  |  )",
+        R"(  |  |              |  |  )",
+        R"(  |  |              |  |  )",
+        R"(  |  |              |  |  )",
+        R"(  ----------------------  )",
+        R"(      |    ||    |        )",
+        R"(      |    ||    |        )",
+        R"(      '----''----'        )",
+        R"(                          )",
+        R"(                          )",
+        R"(                          )",
+        R"(                          )"
+    };
+
     std::string osName = getOSVersion();
     std::string osNameLower = osName;
     std::transform(osNameLower.begin(), osNameLower.end(), osNameLower.begin(), ::tolower);
@@ -1027,6 +1110,9 @@ int main(int argc, char* argv[]) {
     } else if (osNameLower.find("linux") != std::string::npos) {
         ascii = asciiLinux;
         asciiColor = WHITE;
+    } else if (osNameLower.find("android") != std::string::npos) {
+        ascii = asciiAndroid;
+        asciiColor = GREEN;
     }
 
     auto formatVal = [](const std::string& val) {
@@ -1038,6 +1124,22 @@ int main(int argc, char* argv[]) {
 
     std::vector<InfoLine> info;
     info.push_back({"OS:", formatVal(osName)});
+    
+#ifndef _WIN32
+    if (osName.find("Android") != std::string::npos) {
+        FILE* p = popen("getprop ro.product.model", "r");
+        if (p) {
+            char buf[64];
+            if (fgets(buf, sizeof(buf), p)) {
+                std::string model(buf);
+                model.erase(std::remove(model.begin(), model.end(), '\n'), model.end());
+                if (!model.empty()) info.push_back({"Device:", formatVal(model)});
+            }
+            pclose(p);
+        }
+    }
+#endif
+
     info.push_back({"Interface:", formatVal(adapter.name)});
     info.push_back({"Desc:", formatVal(adapter.description)});
     info.push_back({"Status:", colorizeStatus(adapter.status)});
