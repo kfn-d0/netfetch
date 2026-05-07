@@ -2,8 +2,16 @@
 
 A lightweight, network diagnostic CLI for Windows and Linux, inspired by `neofetch`. It grabs your current network interfaces, speed, MTU, data usage, latency, public ASN/IP, and detects your OS to print it alongside a dynamic ASCII art logo.
 
-<img width="652" height="421" alt="1" src="https://github.com/user-attachments/assets/9d72ee98-a009-4282-a95b-1e8a9c2738a3" />
+<img width="652" height="421" alt="1" src="https://github.com/user-attachments/assets/9d72ee98-a009-4282-a95b-1e8a9c2738a3" /> 
 
+<img width="827" height="537" alt="Captura de imagem_20260507_125902-1" src="https://github.com/user-attachments/assets/adaeb775-1579-4299-834b-3f68fe434a7a" />
+
+## Key Features (Linux Improvements)
+
+This version includes several enhancements for Linux environments:
+- **Improved Latency Detection:** Falls back to the system `ping` command if raw socket permissions are missing.
+- **Smart Speed Detection:** Includes a fallback to check parent USB device speed (useful for RNDIS/USB Tethering devices like Xiaomi/Samsung phones).
+- **Accurate DHCP Info:** Better detection of dynamic address assignment on Linux.
 
 ## Building from Source
 
@@ -20,7 +28,6 @@ To compile the binary for Linux, simply compile the source file. No external lib
 ```bash
 g++ netfetch.cpp -o netfetch
 ```
-
 
 ## Installation
 
@@ -44,7 +51,7 @@ To install `netfetch` globally so you can run it from any terminal:
 
 ### Manual Installation
 - **Windows:** Copy `netfetch.exe` into your `C:\Windows` folder.
-- **Linux:** Copy `netfetch` into your `/usr/local/bin` folder.
+- **Linux:** Copy `netfetch` into your `/usr/local/bin` folder or `~/.local/bin/`.
 
 ## Usage
 
